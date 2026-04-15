@@ -59,7 +59,7 @@
  * Actual access goes through ops callbacks since the buffers reside in shared memory.
  */
 struct amdxdna_ipc_msg_hdr {
-	u32 opcode;  /* message opcode (see amdxdna_ipc_msg.h) */
+	u32 opcode;  /* message opcode */
 	u32 msg_id;  /* request/response correlation ID */
 	u32 size;    /* payload size in bytes (excludes this header) */
 	u32 flags;   /* bitfield (response, error, etc.) */
