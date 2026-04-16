@@ -10,123 +10,186 @@
  * Lock-free SPSC doorbell ring for lightweight HSA command submission
  * notifications between HW Domains and management processor via shared memory.
  *
- * Shared-memory layout:
- *
- *   offset  field
- *   0x00    head (u32)      producer write position
- *   0x04    tail (u32)      consumer read position
- *   0x08    ring_mask (u32) N-1, where N is power-of-2 ring size
- *   0x0C    data[0] (u32)   first ring entry
- *   0x10    data[1] (u32)   ...
- *   ...
- *
  * Producer (HW Domain) owns head; consumer (management processor) owns tail.
  * Each data entry is a u32 (e.g., hw_context_id).
+ *
+ * Barrier discipline:
+ *   Producer: writel(data) -> dma_wmb() -> smp_store_release(head)
+ *   Consumer: smp_load_acquire(head) -> dma_rmb() -> readl(data)
+ *
+ * Notification suppression:
+ *   Consumer writes notify_idx to request a kick when head reaches that value.
+ *   Producer checks: if (new_head == notify_idx) then kick IPI.
+ *
+ * Hot-path MMIO budget: 1 peer-index read + 1 data write + 1 index write
+ *   (mask and own index are cached locally in struct amdxdna_ipc_ring)
  */
 
 #include "amdxdna_ipc.h"
 
-#define AMDXDNA_IPC_DB_HEAD_OFF		0x00
-#define AMDXDNA_IPC_DB_TAIL_OFF		0x04
-#define AMDXDNA_IPC_DB_MASK_OFF		0x08
-#define AMDXDNA_IPC_DB_DATA_OFF		0x0C
-
-static inline u32 amdxdna_ipc_db_data_off(u32 idx)
-{
-	return AMDXDNA_IPC_DB_DATA_OFF + idx * sizeof(u32);
-}
+/* Shared-memory layout -- maps directly over the ioremap'd shared memory region */
+struct amdxdna_ipc_db_ring {
+	__le32	head;		/* producer write position (free-running) */
+	__le32	tail;		/* consumer read position (free-running) */
+	__le32	ring_mask;	/* N-1, written once at init, read once by peer */
+	__le32	notify_idx;	/* event-index: kick peer when head crosses this */
+	__le32	data[];		/* ring entries (u32 each) */
+};
 
 /*
- * Initialize a doorbell ring in shared memory.
- * Zeroes head and tail, writes ring_mask = num_entries - 1.
- * num_entries must be a power of 2.  Returns 0 or -EINVAL.
+ * Initialize doorbell ring shared memory and local context.
+ * num_entries must be a power of 2. Returns 0 or -EINVAL.
  */
-static inline int amdxdna_ipc_doorbell_init(const struct amdxdna_ipc_ring_ctx *ctx,
-					    u32 num_entries)
+static inline int amdxdna_ipc_db_init(struct amdxdna_ipc_ring *ring,
+				       void __iomem *base, u32 num_entries)
 {
+	struct amdxdna_ipc_db_ring __iomem *hdr = base;
+
 	if (!num_entries || (num_entries & (num_entries - 1)))
 		return -EINVAL;
 
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_DB_HEAD_OFF, 0);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_DB_TAIL_OFF, 0);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_DB_MASK_OFF, num_entries - 1);
+	ring->base = base;
+	ring->mask = num_entries - 1;
+	ring->cached_idx = 0;
+
+	writel(0, &hdr->head);
+	writel(0, &hdr->tail);
+	writel(num_entries - 1, &hdr->ring_mask);
+	writel(0, &hdr->notify_idx);
 
 	return 0;
 }
 
-/* Check if ring has no pending entries */
-static inline int amdxdna_ipc_doorbell_is_empty(const struct amdxdna_ipc_ring_ctx *ctx)
-{
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_TAIL_OFF);
-
-	return head == tail;
-}
-
-/* Check if ring is full */
-static inline int amdxdna_ipc_doorbell_is_full(const struct amdxdna_ipc_ring_ctx *ctx)
-{
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_MASK_OFF);
-
-	return ((head - tail) & mask) == mask;
-}
-
-/* Number of pending entries in the ring */
-static inline u32 amdxdna_ipc_doorbell_count(const struct amdxdna_ipc_ring_ctx *ctx)
-{
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_MASK_OFF);
-
-	return (head - tail) & mask;
-}
-
 /*
- * Enqueue a value into the doorbell ring (producer side).
- * Writes value at head position and advances head.
- * Returns 0 on success, -ENOSPC if ring is full.
+ * Attach to an already-initialized doorbell ring (peer did init).
+ * Reads ring_mask from shared memory once and caches it locally.
  */
-static inline int amdxdna_ipc_doorbell_produce(const struct amdxdna_ipc_ring_ctx *ctx,
-					       u32 value)
+static inline void amdxdna_ipc_db_attach(struct amdxdna_ipc_ring *ring,
+					  void __iomem *base)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_MASK_OFF);
+	struct amdxdna_ipc_db_ring __iomem *hdr = base;
 
-	if (((head - tail) & mask) == mask)
+	ring->base = base;
+	ring->mask = readl(&hdr->ring_mask);
+	ring->cached_idx = 0;
+}
+
+/* Number of pending entries (producer perspective) */
+static inline u32 amdxdna_ipc_db_count(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+
+	return ring->cached_idx - readl(&hdr->tail);
+}
+
+/* Enqueue one value (producer). Returns 0 or -ENOSPC. */
+static inline int amdxdna_ipc_db_produce(struct amdxdna_ipc_ring *ring,
+					  u32 val)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+	u32 head = ring->cached_idx;
+	u32 tail = smp_load_acquire(&hdr->tail);
+
+	if (head - tail > ring->mask)
 		return -ENOSPC;
 
-	amdxdna_ipc_write32(ctx, amdxdna_ipc_db_data_off(head & mask), value);
-
-	/* Ensure data is written before head is advanced */
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_DB_HEAD_OFF, head + 1);
-
+	writel(val, &hdr->data[head & ring->mask]);
+	dma_wmb();
+	ring->cached_idx = head + 1;
+	smp_store_release(&hdr->head, head + 1);
 	return 0;
 }
 
 /*
- * Dequeue a value from the doorbell ring (consumer side).
- * Reads value at tail position and advances tail.
- * Returns 0 on success, -ENODATA if ring is empty.
+ * Enqueue multiple values (producer). One barrier + one index publish.
+ * Returns 0 or -ENOSPC (none enqueued on failure).
  */
-static inline int amdxdna_ipc_doorbell_consume(const struct amdxdna_ipc_ring_ctx *ctx,
-					       u32 *value)
+static inline int amdxdna_ipc_db_produce_batch(struct amdxdna_ipc_ring *ring,
+					        const u32 *vals, u32 count)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_DB_MASK_OFF);
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+	u32 head = ring->cached_idx;
+	u32 tail = smp_load_acquire(&hdr->tail);
+	u32 i;
+
+	if (head - tail + count > ring->mask + 1)
+		return -ENOSPC;
+
+	for (i = 0; i < count; i++)
+		writel(vals[i], &hdr->data[(head + i) & ring->mask]);
+
+	dma_wmb();
+	ring->cached_idx = head + count;
+	smp_store_release(&hdr->head, head + count);
+	return 0;
+}
+
+/* Dequeue one value (consumer). Returns the value (>=0) or -ENODATA. */
+static inline int amdxdna_ipc_db_consume(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+	u32 head = smp_load_acquire(&hdr->head);
+	u32 tail = ring->cached_idx;
+	u32 val;
 
 	if (head == tail)
 		return -ENODATA;
 
-	*value = amdxdna_ipc_read32(ctx, amdxdna_ipc_db_data_off(tail & mask));
+	dma_rmb();
+	val = readl(&hdr->data[tail & ring->mask]);
+	ring->cached_idx = tail + 1;
+	smp_store_release(&hdr->tail, tail + 1);
+	return (int)val;
+}
 
-	/* Ensure data is read before tail is advanced */
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_DB_TAIL_OFF, tail + 1);
+/*
+ * Dequeue up to max_count values (consumer). One barrier + one tail publish.
+ * Returns number of entries consumed (0 if empty).
+ */
+static inline u32 amdxdna_ipc_db_consume_batch(struct amdxdna_ipc_ring *ring,
+						u32 *out, u32 max_count)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+	u32 head = smp_load_acquire(&hdr->head);
+	u32 tail = ring->cached_idx;
+	u32 avail = head - tail;
+	u32 count, i;
 
-	return 0;
+	if (!avail)
+		return 0;
+
+	count = min(avail, max_count);
+	dma_rmb();
+	for (i = 0; i < count; i++)
+		out[i] = readl(&hdr->data[(tail + i) & ring->mask]);
+
+	ring->cached_idx = tail + count;
+	smp_store_release(&hdr->tail, tail + count);
+	return count;
+}
+
+/*
+ * Check whether the producer should kick the peer (event-index pattern).
+ * Returns true if cached_idx (new head) has crossed the consumer's
+ * notify_idx threshold. Caller decides whether to trigger IPI.
+ */
+static inline bool amdxdna_ipc_db_need_kick(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+
+	return ring->cached_idx == readl(&hdr->notify_idx);
+}
+
+/*
+ * Set the notification threshold (consumer side).
+ * Tells producer: "kick me when your head reaches idx."
+ */
+static inline void amdxdna_ipc_db_set_notify(struct amdxdna_ipc_ring *ring,
+					      u32 idx)
+{
+	struct amdxdna_ipc_db_ring __iomem *hdr = ring->base;
+
+	smp_store_release(&hdr->notify_idx, idx);
 }
 
 #endif /* _AMDXDNA_IPC_DOORBELL_H_ */

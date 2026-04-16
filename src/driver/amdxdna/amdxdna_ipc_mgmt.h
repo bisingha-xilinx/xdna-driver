@@ -10,201 +10,245 @@
  * Lock-free SPSC management buffer-descriptor ring (BDR) for management
  * messages between HW Domains and management processor via shared memory.
  *
- * Shared-memory ring layout:
- *
- *   offset  field
- *   0x00    head (u32)         producer write position
- *   0x04    tail (u32)         consumer read position
- *   0x08    ring_mask (u32)    N-1, where N is power-of-2 descriptor count
- *   0x0C    buf_size (u32)     size of each buffer in the pool
- *   0x10    buf_base_lo (u32)  buffer pool base address (low 32 bits)
- *   0x14    buf_base_hi (u32)  buffer pool base address (high 32 bits)
- *   0x18    version (u32)      protocol version (checked once at init)
- *   0x1C    reserved (u32)     alignment
- *   0x20    desc[0] (u32)      first descriptor (offset into buffer pool)
- *   0x24    desc[1] (u32)      ...
- *   ...
- *
  * Separate buffer pool (at buf_base, not contiguous with the ring):
- *
  *   buf[i] = buf_base + i * buf_size
- *
  * Each buffer contains an amdxdna_ipc_msg_hdr followed by payload.
  *
  * Producer (HW Domain) owns head; consumer (management processor) owns tail.
+ *
+ * Barrier discipline:
+ *   Producer: fill buffer -> dma_wmb() -> smp_store_release(head)
+ *   Consumer: smp_load_acquire(head) -> dma_rmb() -> read buffer
+ *
+ * Notification suppression:
+ *   Consumer writes notify_idx to request a kick when head reaches that value.
+ *   Producer checks: if (new_head == notify_idx) then kick IPI.
  */
 
 #include "amdxdna_ipc.h"
 
-/* ring header field offsets */
-#define AMDXDNA_IPC_MGMT_HEAD_OFF	0x00
-#define AMDXDNA_IPC_MGMT_TAIL_OFF	0x04
-#define AMDXDNA_IPC_MGMT_MASK_OFF	0x08
-#define AMDXDNA_IPC_MGMT_BUFSZ_OFF	0x0C
-#define AMDXDNA_IPC_MGMT_BASELO_OFF	0x10
-#define AMDXDNA_IPC_MGMT_BASEHI_OFF	0x14
-#define AMDXDNA_IPC_MGMT_VER_OFF	0x18
-#define AMDXDNA_IPC_MGMT_RSVD_OFF	0x1C
-#define AMDXDNA_IPC_MGMT_DESC_OFF	0x20
+/* Compile-time ring configuration defaults */
+#define AMDXDNA_IPC_MGMT_NUM_DESCS	16	/* power of 2 */
+#define AMDXDNA_IPC_MGMT_BUF_SIZE	4096
 
-/* message header field offsets (within each buffer in the pool) */
-#define AMDXDNA_IPC_MSG_OPCODE_OFF	0x00
-#define AMDXDNA_IPC_MSG_ID_OFF		0x04
-#define AMDXDNA_IPC_MSG_SIZE_OFF	0x08
-#define AMDXDNA_IPC_MSG_FLAGS_OFF	0x0C
-#define AMDXDNA_IPC_MSG_HDR_SIZE	0x10	/* 16 bytes */
-
-/*
- * Per-message header in each mgmt buffer.
- * Actual access goes through ops callbacks since the buffers reside in shared memory.
- */
-struct amdxdna_ipc_msg_hdr {
-	u32 opcode;  /* message opcode */
-	u32 msg_id;  /* request/response correlation ID */
-	u32 size;    /* payload size in bytes (excludes this header) */
-	u32 flags;   /* bitfield (response, error, etc.) */
+/* Shared-memory layout -- maps directly over the ioremap'd shared memory region */
+struct amdxdna_ipc_mgmt_ring {
+	__le32	head;		/* producer write position (free-running) */
+	__le32	tail;		/* consumer read position (free-running) */
+	__le32	ring_mask;	/* N-1, written once at init */
+	__le32	buf_size;	/* size of each buffer in the pool */
+	__le32	buf_base_lo;	/* buffer pool base address (low 32 bits) */
+	__le32	buf_base_hi;	/* buffer pool base address (high 32 bits) */
+	__le32	version;	/* protocol version (checked once at init) */
+	__le32	notify_idx;	/* event-index for notification suppression */
+	__le32	desc[];		/* descriptor offsets into buffer pool */
 };
 
+/* Per-message header in each mgmt buffer (16 bytes) */
+struct amdxdna_ipc_msg_hdr {
+	u32	opcode;		/* message opcode */
+	u32	msg_id;		/* request/response correlation ID */
+	u32	size;		/* payload size in bytes (excludes this header) */
+	u32	flags;		/* bitfield (response, error, etc.) */
+};
+
+#define AMDXDNA_IPC_MSG_HDR_SIZE	sizeof(struct amdxdna_ipc_msg_hdr)
 #define AMDXDNA_IPC_MSG_FLAG_RESPONSE	BIT(0)
 #define AMDXDNA_IPC_MSG_FLAG_ERROR	BIT(1)
 
-static inline u32 amdxdna_ipc_mgmt_desc_off(u32 idx)
-{
-	return AMDXDNA_IPC_MGMT_DESC_OFF + idx * sizeof(u32);
-}
-
 /*
- * Initialize a management BDR ring in shared memory.
- * Zeroes head/tail, writes ring metadata, and initializes each descriptor
- * to point at its corresponding buffer (desc[i] = i * buf_size).
- * num_descs must be a power of 2.  Returns 0 or -EINVAL.
+ * Initialize management BDR shared memory and local ring context.
+ * num_descs must be a power of 2. Returns 0 or -EINVAL.
  */
-static inline int amdxdna_ipc_mgmt_init(const struct amdxdna_ipc_ring_ctx *ctx,
-					 u32 num_descs, u32 buf_size,
-					 u32 buf_base_lo, u32 buf_base_hi,
-					 u32 version)
+static inline int amdxdna_ipc_mgmt_init(struct amdxdna_ipc_ring *ring,
+					 void __iomem *base, u32 num_descs,
+					 u32 buf_size, u32 buf_base_lo,
+					 u32 buf_base_hi, u32 version)
 {
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = base;
 	u32 i;
 
 	if (!num_descs || (num_descs & (num_descs - 1)))
 		return -EINVAL;
 
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF, 0);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF, 0);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_MASK_OFF, num_descs - 1);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_BUFSZ_OFF, buf_size);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_BASELO_OFF, buf_base_lo);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_BASEHI_OFF, buf_base_hi);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_VER_OFF, version);
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_RSVD_OFF, 0);
+	ring->base = base;
+	ring->mask = num_descs - 1;
+	ring->cached_idx = 0;
+
+	writel(0, &hdr->head);
+	writel(0, &hdr->tail);
+	writel(num_descs - 1, &hdr->ring_mask);
+	writel(buf_size, &hdr->buf_size);
+	writel(buf_base_lo, &hdr->buf_base_lo);
+	writel(buf_base_hi, &hdr->buf_base_hi);
+	writel(version, &hdr->version);
+	writel(0, &hdr->notify_idx);
 
 	for (i = 0; i < num_descs; i++)
-		amdxdna_ipc_write32(ctx, amdxdna_ipc_mgmt_desc_off(i),
-				    i * buf_size);
+		writel(i * buf_size, &hdr->desc[i]);
 
 	return 0;
 }
 
-/* Read protocol version from ring header */
-static inline u32 amdxdna_ipc_mgmt_get_version(const struct amdxdna_ipc_ring_ctx *ctx)
+/*
+ * Attach to an already-initialized management BDR ring (peer did init).
+ * Reads ring_mask from shared memory once and caches it locally.
+ */
+static inline void amdxdna_ipc_mgmt_attach(struct amdxdna_ipc_ring *ring,
+					    void __iomem *base)
 {
-	return amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_VER_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = base;
+
+	ring->base = base;
+	ring->mask = readl(&hdr->ring_mask);
+	ring->cached_idx = 0;
 }
 
-/* Check if ring has no pending descriptors */
-static inline int amdxdna_ipc_mgmt_is_empty(const struct amdxdna_ipc_ring_ctx *ctx)
+/* Read protocol version from ring header (one-time check) */
+static inline u32 amdxdna_ipc_mgmt_get_version(struct amdxdna_ipc_ring *ring)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
 
-	return head == tail;
+	return readl(&hdr->version);
 }
 
-/* Check if ring is full */
-static inline int amdxdna_ipc_mgmt_is_full(const struct amdxdna_ipc_ring_ctx *ctx)
+/* Number of pending descriptors (producer perspective) */
+static inline u32 amdxdna_ipc_mgmt_count(struct amdxdna_ipc_ring *ring)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_MASK_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
 
-	return ((head - tail) & mask) == mask;
+	return ring->cached_idx - readl(&hdr->tail);
 }
 
-/* Number of pending descriptors in the ring */
-static inline u32 amdxdna_ipc_mgmt_count(const struct amdxdna_ipc_ring_ctx *ctx)
-{
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_MASK_OFF);
-
-	return (head - tail) & mask;
-}
-
-/* Compute buffer pool offset for a descriptor at desc_idx */
-static inline u32 amdxdna_ipc_mgmt_buf_offset(const struct amdxdna_ipc_ring_ctx *ctx,
+/* Read the buffer pool offset for a given descriptor index */
+static inline u32 amdxdna_ipc_mgmt_buf_offset(struct amdxdna_ipc_ring *ring,
 					       u32 desc_idx)
 {
-	return amdxdna_ipc_read32(ctx, amdxdna_ipc_mgmt_desc_off(desc_idx));
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+
+	return readl(&hdr->desc[desc_idx]);
 }
 
 /*
  * Claim a descriptor slot at head (producer side).
- * Does NOT advance head -- caller fills the buffer then calls
- * amdxdna_ipc_mgmt_submit().  Returns 0 or -ENOSPC.
+ * Does NOT advance head -- caller fills the buffer then calls submit.
+ * Returns descriptor index (>=0) or -ENOSPC.
  */
-static inline int amdxdna_ipc_mgmt_alloc_desc(const struct amdxdna_ipc_ring_ctx *ctx,
-					       u32 *desc_idx)
+static inline int amdxdna_ipc_mgmt_alloc_desc(struct amdxdna_ipc_ring *ring)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_MASK_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+	u32 head = ring->cached_idx;
+	u32 tail = smp_load_acquire(&hdr->tail);
 
-	if (((head - tail) & mask) == mask)
+	if (head - tail > ring->mask)
 		return -ENOSPC;
 
-	*desc_idx = head & mask;
-	return 0;
+	return head & ring->mask;
 }
 
 /*
- * Advance head to make the last allocated descriptor visible to the consumer.
+ * Advance head by 1 to make the last allocated descriptor visible.
  * Must be called after the producer has written the message into the buffer.
  */
-static inline void amdxdna_ipc_mgmt_submit(const struct amdxdna_ipc_ring_ctx *ctx)
+static inline void amdxdna_ipc_mgmt_submit(struct amdxdna_ipc_ring *ring)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
 
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF, head + 1);
+	dma_wmb();
+	ring->cached_idx++;
+	smp_store_release(&hdr->head, ring->cached_idx);
 }
 
 /*
- * Read the next pending descriptor (consumer side).
- * Does NOT advance tail -- caller processes the message then calls
- * amdxdna_ipc_mgmt_complete().  Returns 0 or -ENODATA.
+ * Advance head by count to commit multiple descriptors at once.
+ * One barrier + one index publish for the entire batch.
  */
-static inline int amdxdna_ipc_mgmt_consume(const struct amdxdna_ipc_ring_ctx *ctx,
-					    u32 *desc_idx)
+static inline void amdxdna_ipc_mgmt_submit_n(struct amdxdna_ipc_ring *ring,
+					      u32 count)
 {
-	u32 head = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_HEAD_OFF);
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
-	u32 mask = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_MASK_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+
+	dma_wmb();
+	ring->cached_idx += count;
+	smp_store_release(&hdr->head, ring->cached_idx);
+}
+
+/*
+ * Peek at the next pending descriptor (consumer side).
+ * Does NOT advance tail -- caller processes then calls complete.
+ * Returns descriptor index (>=0) or -ENODATA.
+ */
+static inline int amdxdna_ipc_mgmt_consume(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+	u32 head = smp_load_acquire(&hdr->head);
+	u32 tail = ring->cached_idx;
 
 	if (head == tail)
 		return -ENODATA;
 
-	*desc_idx = tail & mask;
-	return 0;
+	dma_rmb();
+	return tail & ring->mask;
+}
+
+/* Advance tail by 1 to release a consumed descriptor. */
+static inline void amdxdna_ipc_mgmt_complete(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+
+	ring->cached_idx++;
+	smp_store_release(&hdr->tail, ring->cached_idx);
 }
 
 /*
- * Advance tail to release a consumed descriptor.
- * Must be called after the consumer has finished processing the message.
+ * Drain up to max_count descriptors (consumer). One barrier + one tail publish.
+ * Writes raw free-running indices to out_indices[]; caller uses & ring->mask
+ * to get the slot index. Returns number of entries consumed (0 if empty).
  */
-static inline void amdxdna_ipc_mgmt_complete(const struct amdxdna_ipc_ring_ctx *ctx)
+static inline u32 amdxdna_ipc_mgmt_drain(struct amdxdna_ipc_ring *ring,
+					  u32 *out_indices, u32 max_count)
 {
-	u32 tail = amdxdna_ipc_read32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF);
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+	u32 head = smp_load_acquire(&hdr->head);
+	u32 tail = ring->cached_idx;
+	u32 avail = head - tail;
+	u32 count, i;
 
-	amdxdna_ipc_write32(ctx, AMDXDNA_IPC_MGMT_TAIL_OFF, tail + 1);
+	if (!avail)
+		return 0;
+
+	count = min(avail, max_count);
+	dma_rmb();
+	for (i = 0; i < count; i++)
+		out_indices[i] = (tail + i) & ring->mask;
+
+	ring->cached_idx = tail + count;
+	smp_store_release(&hdr->tail, tail + count);
+	return count;
+}
+
+/*
+ * Check whether the producer should kick the peer (event-index pattern).
+ * Returns true if cached_idx (new head) has crossed the consumer's
+ * notify_idx threshold.
+ */
+static inline bool amdxdna_ipc_mgmt_need_kick(struct amdxdna_ipc_ring *ring)
+{
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+
+	return ring->cached_idx == readl(&hdr->notify_idx);
+}
+
+/*
+ * Set the notification threshold (consumer side).
+ * Tells producer: "kick me when your head reaches idx."
+ */
+static inline void amdxdna_ipc_mgmt_set_notify(struct amdxdna_ipc_ring *ring,
+						u32 idx)
+{
+	struct amdxdna_ipc_mgmt_ring __iomem *hdr = ring->base;
+
+	smp_store_release(&hdr->notify_idx, idx);
 }
 
 #endif /* _AMDXDNA_IPC_MGMT_H_ */
