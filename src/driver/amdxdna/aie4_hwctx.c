@@ -350,7 +350,7 @@ done:
 
 static inline void ring_doorbell(struct amdxdna_ctx *ctx)
 {
-	writel(0, ctx->priv->doorbell_addr);
+	ctx->priv->ring_doorbell_fn(ctx);
 }
 
 static inline bool valid_queue_index(u64 read, u64 write, u32 capacity)

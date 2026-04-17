@@ -623,6 +623,7 @@ int aie2_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_ctx *ctx,
 	info->i2x.rb_start_addr   = AIE2_SRAM_OFF(ndev, cq_pair->i2x_q.buf_addr);
 	info->i2x.rb_size	  = cq_pair->i2x_q.buf_size;
 
+	info->irq = 0;
 	aie2_calc_intr_reg(info);
 	XDNA_DBG(xdna,
 		 "%s created hwctx %d pasid %d priority 0x%x start col %d num col %d unused col %d",

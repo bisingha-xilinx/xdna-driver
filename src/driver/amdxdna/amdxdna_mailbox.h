@@ -66,12 +66,14 @@ struct xdna_mailbox_chann_res {
  * @i2x: firmware to host mailbox resources
  * @intr_reg: register addr of MSI-X interrupt
  * @msix_id: mailbox MSI-X interrupt vector index
+ * @irq: pre-resolved IRQ, or 0 to derive from msix_id via pci_irq_vector()
  */
 struct xdna_mailbox_chann_info {
 	struct xdna_mailbox_chann_res	x2i;
 	struct xdna_mailbox_chann_res	i2x;
 	u32				intr_reg;
 	u32				msix_id;
+	int				irq;
 };
 
 /*
@@ -151,6 +153,16 @@ void xdna_mailbox_destroy_channel(struct mailbox_channel *mailbox_chann);
  * Stop receiving response and sending messages
  */
 void xdna_mailbox_stop_channel(struct mailbox_channel *mailbox_chann);
+
+/*
+ * xdna_mailbox_poll_channel() -- trigger rx processing on a channel
+ *
+ * @mailbox_chann: the handle return from xdna_mailbox_create_channel()
+ *
+ * Queues the channel's rx work for processing. Use this for polling-based
+ * platforms that do not have IRQ-driven rx notification.
+ */
+void xdna_mailbox_poll_channel(struct mailbox_channel *mailbox_chann);
 
 /*
  * xdna_mailbox_send_msg() -- Send a message

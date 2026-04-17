@@ -180,6 +180,7 @@ static int aie2_mgmt_chann_init(struct amdxdna_dev_hdl *ndev)
 		ret = -EINVAL;
 
 done:
+	ndev->mgmt_info.irq = 0;
 	aie2_calc_intr_reg(&ndev->mgmt_info);
 	aie2_dump_chann_info_debug(ndev);
 

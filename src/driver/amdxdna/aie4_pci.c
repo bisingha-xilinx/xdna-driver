@@ -296,7 +296,7 @@ static int aie4_mailbox_init(struct amdxdna_dev *xdna)
 	return aie4_mailbox_start(xdna, &mbox_info);
 }
 
-static int aie4_mgmt_fw_init(struct amdxdna_dev_hdl *ndev)
+int aie4_mgmt_fw_init(struct amdxdna_dev_hdl *ndev)
 {
 	struct pci_dev *pdev = to_pci_dev(ndev->xdna->ddev.dev);
 	struct amdxdna_mgmt_dma_hdl *dma_hdl;
@@ -334,7 +334,7 @@ static int aie4_mgmt_fw_init(struct amdxdna_dev_hdl *ndev)
 	return aie4_set_ctx_timeout(ndev, timeout_in_sec * 1000);
 }
 
-static int aie4_mgmt_fw_query(struct amdxdna_dev_hdl *ndev)
+int aie4_mgmt_fw_query(struct amdxdna_dev_hdl *ndev)
 {
 	struct amdxdna_dev *xdna = ndev->xdna;
 	struct pci_dev *pdev = to_pci_dev(xdna->ddev.dev);
@@ -427,7 +427,7 @@ stop_smu:
 	return ret;
 }
 
-static int aie4_partition_init(struct amdxdna_dev_hdl *ndev)
+int aie4_partition_init(struct amdxdna_dev_hdl *ndev)
 {
 	DECLARE_AIE4_MSG(aie4_msg_create_partition, AIE4_MSG_OP_CREATE_PARTITION);
 	struct amdxdna_dev *xdna = ndev->xdna;
@@ -978,6 +978,11 @@ static int aie4_ctx_init_dpm(struct amdxdna_ctx *ctx)
 	return ret;
 }
 
+static void aie4_ring_doorbell_pci(struct amdxdna_ctx *ctx)
+{
+	writel(0, ctx->priv->doorbell_addr);
+}
+
 int aie4_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_ctx *ctx)
 {
 	DECLARE_AIE4_MSG(aie4_msg_create_hw_context, AIE4_MSG_OP_CREATE_HW_CONTEXT);
@@ -1071,6 +1076,8 @@ int aie4_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_ctx *ctx)
 
 	nctx->hw_ctx_id = resp.hw_context_id;
 	nctx->doorbell_addr = ndev->doorbell_base + resp.doorbell_offset;
+	if (!nctx->ring_doorbell_fn)
+		nctx->ring_doorbell_fn = aie4_ring_doorbell_pci;
 	/*
 	 * If user-mode-submission, pass doorbell offset to user via
 	 * ctx->doorbell_offset. Driver will not ring the doorbell.
@@ -1997,7 +2004,7 @@ static int aie4_get_frame_boundary_preempt_state(struct amdxdna_client *client,
 	return 0;
 }
 
-static int aie4_get_info(struct amdxdna_client *client, struct amdxdna_drm_get_info *args)
+int aie4_get_info(struct amdxdna_client *client, struct amdxdna_drm_get_info *args)
 {
 	struct amdxdna_dev *xdna = client->xdna;
 	int ret;
@@ -2662,7 +2669,7 @@ unlock_srcu:
 	return ret;
 }
 
-static int aie4_get_array(struct amdxdna_client *client, struct amdxdna_drm_get_array *args)
+int aie4_get_array(struct amdxdna_client *client, struct amdxdna_drm_get_array *args)
 {
 	struct amdxdna_dev *xdna = client->xdna;
 	int ret;
@@ -2761,7 +2768,7 @@ static int aie4_set_force_preempt_state(struct amdxdna_client *client,
 	return 0;
 }
 
-static int aie4_set_state(struct amdxdna_client *client, struct amdxdna_drm_set_state *args)
+int aie4_set_state(struct amdxdna_client *client, struct amdxdna_drm_set_state *args)
 {
 	struct amdxdna_dev *xdna = client->xdna;
 	int ret;

@@ -101,6 +101,7 @@ struct amdxdna_ctx_priv {
 	struct list_head		running_job_list;
 
 	void			__iomem	*doorbell_addr;
+	void			(*ring_doorbell_fn)(struct amdxdna_ctx *ctx);
 
 	u32				meta_bo_hdl;
 	struct cert_comp		*cert_comp;
@@ -181,6 +182,9 @@ struct amdxdna_dev_hdl {
 	/* Protect mgmt_chann and cert_comp kref in cert_comp_xa */
 	struct mutex			aie4_lock;
 	struct xarray			cert_comp_xa;
+
+	/* Platform-private data; future cleanup: use container_of pattern */
+	void				*priv_data;
 };
 
 /* CERT completion event */
@@ -283,6 +287,12 @@ int aie4_psp_start(struct psp_device *psp);
 void aie4_psp_stop(struct psp_device *psp);
 
 /* aie4_pci.c */
+int aie4_mgmt_fw_query(struct amdxdna_dev_hdl *ndev);
+int aie4_mgmt_fw_init(struct amdxdna_dev_hdl *ndev);
+int aie4_partition_init(struct amdxdna_dev_hdl *ndev);
+int aie4_get_info(struct amdxdna_client *client, struct amdxdna_drm_get_info *args);
+int aie4_get_array(struct amdxdna_client *client, struct amdxdna_drm_get_array *args);
+int aie4_set_state(struct amdxdna_client *client, struct amdxdna_drm_set_state *args);
 int aie4_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_ctx *ctx);
 int aie4_destroy_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_ctx *ctx,
 			 int graceful);

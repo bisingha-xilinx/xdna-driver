@@ -834,12 +834,16 @@ xdna_mailbox_create_channel(struct mailbox *mb,
 	u32 mb_irq;
 	int ret;
 
-	ret = pci_irq_vector(to_pci_dev(mb->dev), info->msix_id);
-	if (ret < 0) {
-		pr_err("failed to alloc irq vector %d", ret);
-		return NULL;
+	if (info->irq) {
+		mb_irq = info->irq;
+	} else {
+		ret = pci_irq_vector(to_pci_dev(mb->dev), info->msix_id);
+		if (ret < 0) {
+			pr_err("failed to alloc irq vector %d", ret);
+			return NULL;
+		}
+		mb_irq = ret;
 	}
-	mb_irq = ret;
 
 #if defined(CONFIG_DEBUG_FS)
 	struct mailbox_res_record *record;
@@ -995,6 +999,14 @@ void xdna_mailbox_destroy_channel(struct mailbox_channel *mailbox_chann)
 {
 	xdna_mailbox_release_channel(mailbox_chann);
 	xdna_mailbox_free_channel(mailbox_chann);
+}
+
+void xdna_mailbox_poll_channel(struct mailbox_channel *mb_chann)
+{
+	if (!mb_chann || READ_ONCE(mb_chann->bad_state))
+		return;
+
+	queue_work(mb_chann->work_q, &mb_chann->rx_work);
 }
 
 struct mailbox *xdna_mailbox_create(struct device *dev,
