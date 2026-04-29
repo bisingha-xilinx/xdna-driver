@@ -39,6 +39,25 @@ config_gen_phoenix()
   }; 
 }
 
+config_gen_ve2::
+config_gen_ve2()
+{
+  /*
+   * Mirrors src/shim_ve2/smi_ve2.cpp: only the four tests whose artifacts
+   * are packaged in VTD's xrt_smi_ve2.a (latency, throughput and the
+   * cmd-chain variants).  GEMM and the other npu3-style tests are
+   * intentionally omitted because the ve2 archive ships no gemm.elf and
+   * TestGemm has no aie2ps geometry handling.
+   */
+  validate_test_desc = {
+    {"all", "All applicable validate tests will be executed (default)", "common"},
+    {"cmd-chain-latency", "Run end-to-end latency test using command chaining", "hidden"},
+    {"cmd-chain-throughput", "Run end-to-end throughput test using command chaining", "hidden"},
+    {"latency", "Run end-to-end latency test", "common"},
+    {"throughput", "Run end-to-end throughput test", "common"},
+  };
+}
+
   // Function to create the "validate" subcommand
 subcommand 
 config_gen_xdna::create_validate_subcommand()
@@ -133,6 +152,19 @@ populate_smi_instance(xrt_core::smi::smi* smi_instance, const xrt_core::device* 
   case smi_hardware_config::hardware_type::npu3_f3:
   {
     generator = std::make_shared<config_gen_npu3>();
+    break;
+  }
+  /*
+   * aie2ps is the same Versal AIE2 silicon as ve2; the rpmsg variant
+   * just routes management via RPU firmware (npu3/aie4 protocol) but
+   * runs the same AIE ELFs.  Use the ve2 test list for both so that
+   * 'xrt-smi validate' offers only tests whose artifacts ship in
+   * xrt_smi_ve2.a.
+   */
+  case smi_hardware_config::hardware_type::aie2ps:
+  case smi_hardware_config::hardware_type::ve2:
+  {
+    generator = std::make_shared<config_gen_ve2>();
     break;
   }
   default:
