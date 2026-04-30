@@ -39,8 +39,8 @@ config_gen_phoenix()
   }; 
 }
 
-config_gen_ve2::
-config_gen_ve2()
+config_gen_npu3_aie2ps::
+config_gen_npu3_aie2ps()
 {
   /*
    * Mirrors src/shim_ve2/smi_ve2.cpp: only the four tests whose artifacts
@@ -155,16 +155,16 @@ populate_smi_instance(xrt_core::smi::smi* smi_instance, const xrt_core::device* 
     break;
   }
   /*
-   * aie2ps is the same Versal AIE2 silicon as ve2; the rpmsg variant
-   * just routes management via RPU firmware (npu3/aie4 protocol) but
-   * runs the same AIE ELFs.  Use the ve2 test list for both so that
-   * 'xrt-smi validate' offers only tests whose artifacts ship in
-   * xrt_smi_ve2.a.
+   * Telluride aie2ps and the T20 npu3_aie2ps SoC share the same Versal
+   * AIE2 ("ve2") silicon; npu3_aie2ps just routes management via RPU
+   * firmware (npu3/aie4 protocol) but runs the same AIE ELFs.  Use the
+   * ve2-style test list for both so that 'xrt-smi validate' offers only
+   * tests whose artifacts ship in xrt_smi_ve2.a.
    */
   case smi_hardware_config::hardware_type::aie2ps:
-  case smi_hardware_config::hardware_type::ve2:
+  case smi_hardware_config::hardware_type::npu3_aie2ps:
   {
-    generator = std::make_shared<config_gen_ve2>();
+    generator = std::make_shared<config_gen_npu3_aie2ps>();
     break;
   }
   default:

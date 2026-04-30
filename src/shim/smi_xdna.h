@@ -67,15 +67,17 @@ class config_gen_npu3 : public config_gen_xdna {
 
 };
 
-// class : config_gen_ve2
-// Specific implementation for Versal AIE2 (ve2) and the rpmsg/aie2ps variant
-// (same silicon, different management transport).  Only the tests whose
-// artifacts ship in xrt_smi_ve2.a (see VTD: archive/ve2/) are exposed.
-class config_gen_ve2 : public config_gen_xdna {
+// class : config_gen_npu3_aie2ps
+// Specific implementation for the Telluride aie2ps and T20 npu3_aie2ps
+// SoC variants (same Versal AIE2 / "ve2" silicon, different management
+// transport: Linux-direct vs npu3 firmware over rpmsg).  Only the tests
+// whose artifacts ship in xrt_smi_ve2.a (see VTD: archive/ve2/) are
+// exposed.
+class config_gen_npu3_aie2ps : public config_gen_xdna {
   std::vector<xrt_core::smi::basic_option> validate_test_desc;
 
 public:
-  config_gen_ve2();
+  config_gen_npu3_aie2ps();
 
   const
   std::vector<xrt_core::smi::basic_option>&
