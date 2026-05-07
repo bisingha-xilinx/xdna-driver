@@ -37,6 +37,7 @@ amdxdna-y := \
 	amdxdna_carvedout_buf.o \
 	amdxdna_gem.o \
 	amdxdna_cma_buf.o \
+	amdxdna_cert_loader.o \
 
 amdxdna-$(OFT_CONFIG_AMDXDNA_PCI) += \
 	aie_psp.o \

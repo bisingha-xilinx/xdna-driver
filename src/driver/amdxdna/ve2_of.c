@@ -10,6 +10,7 @@
 
 #include "ve2_of.h"
 #include "ve2_mgmt.h"
+#include "amdxdna_cert_loader.h"
 
 static int ve2_load_fw(struct amdxdna_dev_hdl *xdna_hdl)
 {
@@ -440,6 +441,12 @@ static int ve2_init(struct amdxdna_dev *xdna)
 			XDNA_INFO(xdna, "Failed to parse memory topology (err=%d)\n", ret);
 	}
 
+#ifdef CONFIG_AMDXDNA_DEBUG_TEST
+	ret = amdxdna_cert_init(xdna);
+	if (ret)
+		XDNA_WARN(xdna, "CERT loader init failed: %d (non-fatal)", ret);
+#endif
+
 	return 0;
 }
 
@@ -449,6 +456,9 @@ static void ve2_fini(struct amdxdna_dev *xdna)
 	/* All resources are managed by devm_/drmm_ */
 	XDNA_DBG(xdna, "VE2 device cleanup: releasing resources");
 
+#ifdef CONFIG_AMDXDNA_DEBUG_TEST
+	amdxdna_cert_fini(xdna);
+#endif
 	ve2_cma_mem_region_remove(xdna);
 
 	/* Cleanup hwctx ID XArray */

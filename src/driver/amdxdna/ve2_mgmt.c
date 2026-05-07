@@ -13,6 +13,7 @@
 #include "ve2_mgmt.h"
 #include "ve2_res_solver.h"
 #include "amdxdna_error.h"
+#include "amdxdna_cert_loader.h"
 
 /* Module parameter: delay in seconds before waking threads on AIE error (for devmem debug) */
 static int aie_error_delay_sec;
@@ -344,6 +345,12 @@ void ve2_mgmt_handshake_init(struct amdxdna_dev *xdna,
 	start_col = nhwctx->start_col;
 	num_col = nhwctx->num_col;
 
+#ifdef CONFIG_AMDXDNA_DEBUG_TEST
+	nhwctx->args->handshake_cols = 0;
+	nhwctx->args->handshake = NULL;
+	nhwctx->args->init_opts = (AIE_PART_INIT_OPT_DEFAULT |
+		AIE_PART_INIT_OPT_DIS_TLAST_ERROR) & ~AIE_PART_INIT_OPT_UC_ENB_MEM_PRIV;
+#else
 	hs_data = ve2_prepare_hs_data(xdna, nhwctx, true);
 	if (!hs_data) {
 		XDNA_ERR(xdna, "preparing cert handshake data failed ");
@@ -360,6 +367,7 @@ void ve2_mgmt_handshake_init(struct amdxdna_dev *xdna,
 	XDNA_DBG(xdna,
 		 "handshake: ve2_partition_initialize enter start_col=%u num_col=%u hwctx=%p",
 		 start_col, num_col, hwctx);
+#endif
 	trace_amdxdna_trace_point("XRT_PROFILING_TRACE_PARTITION_INIT",
 				  hwctx->client->pid, start_col, hwctx->priv->id, num_col);
 	ret = ve2_partition_initialize(nhwctx->aie_dev, nhwctx->args);
@@ -375,11 +383,27 @@ void ve2_mgmt_handshake_init(struct amdxdna_dev *xdna,
 				  hwctx->client->pid, start_col, hwctx->priv->id, num_col);
 
 	XDNA_DBG(xdna, "handshake: ve2_partition_initialize ok hwctx=%p", hwctx);
+#ifdef CONFIG_AMDXDNA_DEBUG_TEST
+	for (u32 col = 0; col < num_col; col++) {
+		struct handshake hs;
 
+		memset(&hs, 0, sizeof(hs));
+		cert_setup_partition(xdna, nhwctx, col, &hs);
+		ret = amdxdna_cert_manual_handshake(xdna, &hs, sizeof(hs),
+						    start_col + col);
+		if (ret) {
+			XDNA_ERR(xdna, "PLM handshake failed col %u: %d",
+				 start_col + col, ret);
+			return;
+		}
+	}
+	amdxdna_cert_manual_wakeup(xdna, start_col, num_col);
+#else
 	for (int col = num_col - 1; col >= 0; col--)
 		ve2_partition_uc_wakeup(nhwctx->aie_dev, col);
 
 	XDNA_DBG(xdna, "partition uc_wakeup done cols=%u hwctx=%p", num_col, hwctx);
+#endif
 
 release_hs_data:
 	ve2_free_hs_data(hs_data, num_col);
@@ -1401,12 +1425,16 @@ struct amdxdna_ctx *ve2_get_hwctx(struct amdxdna_dev *xdna, u32 col)
 int notify_fw_cmd_ready(struct amdxdna_ctx *hwctx)
 {
 	struct amdxdna_dev *xdna = hwctx->client->xdna;
-	u32 value = VE2_USER_EVENT_ID;
 	int ret;
 
+#ifndef CONFIG_AMDXDNA_DEBUG_TEST
+	u32 value = VE2_USER_EVENT_ID;
 	ret = ve2_partition_write(hwctx->priv->aie_dev, 0, 0,
 				  VE2_EVENT_GENERATE_REG, sizeof(u32),
 				  (void *)&(value));
+#else
+	ret = amdxdna_cert_manual_doorbell(xdna, hwctx->start_col, 1);
+#endif
 	if (ret < 0)
 		XDNA_ERR(xdna, "Failed to write event_generate register, err=%d", ret);
 
