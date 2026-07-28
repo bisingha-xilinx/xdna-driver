@@ -36,6 +36,9 @@ enum hsa_cmd_state
 #define HSA_INVALID_PAGE          HSA_ERR(self_id * 100 + 5)
 #define HSA_PKT_TIMEOUT           HSA_ERR(self_id * 100 + 6)
 #define HSA_MAX_LEVEL1_INDIRECT_ENTRIES (6)
+/* Indirect ring is indexed by absolute uC/column index, so it spans the full
+ * AIE array. Keep in sync with HSA_MAX_UC_SLOTS in the kernel aie4_host_queue.h. */
+#define HSA_MAX_UC_SLOTS (24)
 
 #define LAST_CMD (0)
 #define NOT_LAST_CMD (1)

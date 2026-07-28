@@ -158,7 +158,7 @@ static int aie4_ctx_col_list_init(struct amdxdna_ctx *ctx)
 
 static inline void aie4_ctx_umq_dump(struct amdxdna_ctx *ctx)
 {
-	const size_t indir_pkts_sz = CTX_MAX_CMDS * HSA_MAX_LEVEL1_INDIRECT_ENTRIES *
+	const size_t indir_pkts_sz = CTX_MAX_CMDS * HSA_MAX_UC_SLOTS *
 		sizeof(struct host_indirect_packet_data);
 	const size_t pkts_sz = CTX_MAX_CMDS * sizeof(struct host_queue_packet);
 	const size_t hdr_sz = sizeof(struct host_queue_header);
@@ -170,7 +170,7 @@ static inline void aie4_ctx_umq_dump(struct amdxdna_ctx *ctx)
 
 static int aie4_ctx_umq_init(struct amdxdna_ctx *ctx)
 {
-	const size_t indir_pkts_sz = CTX_MAX_CMDS * HSA_MAX_LEVEL1_INDIRECT_ENTRIES *
+	const size_t indir_pkts_sz = CTX_MAX_CMDS * HSA_MAX_UC_SLOTS *
 		sizeof(struct host_indirect_packet_data);
 	const size_t pkts_sz = CTX_MAX_CMDS * sizeof(struct host_queue_packet);
 	struct amdxdna_dev *xdna = ctx->client->xdna;
@@ -230,7 +230,7 @@ static int aie4_ctx_umq_init(struct amdxdna_ctx *ctx)
 	qhdr->data_address = amdxdna_gem_dev_addr(umq_bo) + sizeof(*qhdr);
 	for (i = 0; i < CTX_MAX_CMDS; i++)
 		priv->umq_pkts[i].pkt_header.common_header.opcode = OPCODE_EXEC_BUF;
-	for (i = 0; i < CTX_MAX_CMDS * HSA_MAX_LEVEL1_INDIRECT_ENTRIES; i++) {
+	for (i = 0; i < CTX_MAX_CMDS * HSA_MAX_UC_SLOTS; i++) {
 		priv->umq_indirect_pkts[i].header.opcode = OPCODE_EXEC_BUF;
 		priv->umq_indirect_pkts[i].header.count = sizeof(struct exec_buf);
 		priv->umq_indirect_pkts[i].header.distribute = 1;
@@ -862,7 +862,7 @@ fill_indirect_pkt(struct amdxdna_ctx_priv *priv, u64 slot_idx, u32 total_slots,
 		u32 uci = dpu->uc_index;
 		u32 idx;
 
-		if (uci >= HSA_MAX_LEVEL1_INDIRECT_ENTRIES) {
+		if (uci >= HSA_MAX_UC_SLOTS) {
 			XDNA_ERR(priv->ctx->client->xdna, "Invalid uc index %d", uci);
 			continue;
 		}
@@ -1292,14 +1292,10 @@ static int aie4_ctx_config_debug_bo(struct amdxdna_ctx *ctx, u32 bo_hdl, int att
 	XDNA_DBG(xdna, "Found bo %lld", meta_buffer->bo_handle);
 
 	/*
-	 * The maximum number of CERT uCs in a full-NPU context is
-	 *   dev_info->num_col * dev_info->uc_per_col
-	 * (both per-device-arch constants; see struct amdxdna_dev_info),
-	 * and is additionally bounded by the firmware ABI array size in
-	 * req.cert_logging.info[] (see struct
-	 * aie4_msg_context_config_cert_logging). Use the tighter of the two.
+	 * CERT log config is indexed by absolute CERT index across the full array;
+	 * the FW wire ABI (req.cert_logging.info[]) caps it, so use the smaller.
 	 */
-	u32 max_certs = (u32)xdna->dev_info->num_col * xdna->dev_info->uc_per_col;
+	u32 max_certs = (u32)ndev->total_col * xdna->dev_info->uc_per_col;
 
 	if (max_certs > ARRAY_SIZE(req.cert_logging.info))
 		max_certs = ARRAY_SIZE(req.cert_logging.info);
@@ -1312,14 +1308,11 @@ static int aie4_ctx_config_debug_bo(struct amdxdna_ctx *ctx, u32 bo_hdl, int att
 		u64 off_addr;
 
 		if (index >= max_certs) {
-			XDNA_ERR(xdna,
-				 "invalid CERT index %u for buf_type %u (num_ucs=%u, num_col=%u, uc_per_col=%u, max=%u)",
-				 index, meta_buffer->buf_type,
-				 meta_buffer->num_ucs,
-				 xdna->dev_info->num_col,
-				 xdna->dev_info->uc_per_col, max_certs);
-			ret = -EINVAL;
-			goto put_log_bo;
+			XDNA_WARN(xdna,
+				  "skip CERT log for uc index %u (buf_type %u, num_ucs=%u): exceeds wire array size %u",
+				  index, meta_buffer->buf_type,
+				  meta_buffer->num_ucs, max_certs);
+			continue;
 		}
 
 		if (!attach) {
@@ -1343,7 +1336,9 @@ static int aie4_ctx_config_debug_bo(struct amdxdna_ctx *ctx, u32 bo_hdl, int att
 			 index, off_addr, entry->size);
 	}
 
-	req.cert_logging.num = attach ? meta_buffer->num_ucs : 0;
+	/* Cap at the wire array size so an over-wide meta buffer isn't FW-rejected. */
+	req.cert_logging.num = attach ?
+		min_t(u32, meta_buffer->num_ucs, ARRAY_SIZE(req.cert_logging.info)) : 0;
 
 	req.hw_context_id = ctx->priv->hw_ctx_id;
 	req.property = config_property;
@@ -1354,7 +1349,6 @@ static int aie4_ctx_config_debug_bo(struct amdxdna_ctx *ctx, u32 bo_hdl, int att
 
 	XDNA_DBG(xdna, "Attach debug BO %d to %s, ret: %d", bo_hdl, ctx->name, ret);
 
-put_log_bo:
 	amdxdna_gem_put_obj(log_bo);
 put_meta_bo:
 	amdxdna_gem_put_obj(meta_bo);

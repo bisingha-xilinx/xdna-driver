@@ -42,10 +42,10 @@ hwq_umq(const device& dev, size_t nslots) : hwq(dev)
   // host queue layout:
   //   host_queue_header_t
   //   host_queue_packet_t [nslots]
-  //   indirect [HSA_MAX_LEVEL1_INDIRECT_ENTRIES * indirect_buffer * nslots]
+  //   indirect [HSA_MAX_UC_SLOTS * indirect_buffer * nslots]
   const size_t header_sz = sizeof(struct host_queue_header);
   const size_t queue_sz = sizeof(struct host_queue_packet) * nslots;
-  const size_t indirect_sz = sizeof(struct host_indirect_data) * HSA_MAX_LEVEL1_INDIRECT_ENTRIES * nslots;
+  const size_t indirect_sz = sizeof(struct host_indirect_data) * HSA_MAX_UC_SLOTS * nslots;
 
 #ifdef UMQ_HELLO_TEST
   const size_t umq_sz = 0x200000;
@@ -66,7 +66,7 @@ hwq_umq(const device& dev, size_t nslots) : hwq(dev)
 
   // init slots and indirect buf
   for (size_t i = 0; i < nslots; i++)
-    init_indirect_buf(&m_umq_indirect_buf[i * HSA_MAX_LEVEL1_INDIRECT_ENTRIES], HSA_MAX_LEVEL1_INDIRECT_ENTRIES);
+    init_indirect_buf(&m_umq_indirect_buf[i * HSA_MAX_UC_SLOTS], HSA_MAX_UC_SLOTS);
 
   m_umq_hdr->capacity = nslots;
   // data_address starts after header
@@ -264,7 +264,7 @@ fill_indirect_exec_buf(uint32_t slot_idx, uint32_t total_slots, ert_dpu_data *dp
 
   for (; dpu; hp++, dpu = get_ert_dpu_data_next(dpu)) {
     auto uci = dpu->uc_index;
-    if (uci >= HSA_MAX_LEVEL1_INDIRECT_ENTRIES)
+    if (uci >= HSA_MAX_UC_SLOTS)
       shim_err(EINVAL, "dpu uc_index %d is invalid", uci);
     auto prefix_idx = uci * total_slots + slot_idx;
     auto buf_paddr = m_indirect_paddr + prefix_idx * sizeof(struct host_indirect_data);

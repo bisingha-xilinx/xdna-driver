@@ -9,6 +9,9 @@
 /* Allow at least one runlist cmd and a few single cmds. Must be power of 2. */
 #define CTX_MAX_CMDS			32
 #define HSA_MAX_LEVEL1_INDIRECT_ENTRIES	6
+/* Indirect ring is indexed by absolute uC/column index, so its uC dimension
+ * spans the full AIE array. Keep in sync with the shim (umq/host_queue.h). */
+#define HSA_MAX_UC_SLOTS		24
 #define QUEUE_INDEX_START		0
 
 /*
