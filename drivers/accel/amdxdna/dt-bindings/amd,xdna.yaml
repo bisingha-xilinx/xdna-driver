@@ -59,8 +59,8 @@ properties:
       Phandles to reserved-memory regions, matched by name via
       memory-region-names.  "mgmt"/"doorbell" are predefined-layout regions
       accessed only by the CPU (ioremap).  "fw" and "aie" are reusable
-      shared-dma-pool regions the driver allocates coherent DMA buffers from
-      with dma_alloc (see memory-region-names).
+      shared-dma-pool regions the driver allocates cacheable, software-coherent
+      DMA buffers from with dma_alloc (see memory-region-names).
 
   memory-region-names:
     minItems: 2
@@ -110,14 +110,14 @@ examples:
         };
 
         /* firmware-visible pool, placed < 4 GB for the 32-bit RPU;
-         * coherent DMA buffers (allocated with dma_alloc). */
+         * cacheable, software-coherent (allocated with dma_alloc). */
         rpu_cma: rpu-cma@70000000 {
             compatible = "shared-dma-pool";
             reg = <0x0 0x70000000 0x0 0x4000000>;
             reusable;
         };
 
-        /* AIE/CERT coherent DMA pool */
+        /* AIE/CERT DMA pool (cacheable, software-coherent) */
         aie_cma: aie-cma@800000000 {
             compatible = "shared-dma-pool";
             reg = <0x8 0x00000000 0x0 0x40000000>;
