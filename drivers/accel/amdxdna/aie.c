@@ -449,14 +449,9 @@ struct amdxdna_msg_buf_hdl *amdxdna_alloc_msg_buff(struct amdxdna_dev *xdna, u32
 		if (IS_ERR(hdl->vaddr))
 			goto free_hdl;
 	} else {
-		/*
-		 * Coherent (non-cacheable on the non-coherent platform) so the
-		 * firmware and CPU stay in sync with no cache maintenance. On x86,
-		 * where the part is reported coherent, this is cacheable and still
-		 * needs amdxdna_cache_flush() around firmware access.
-		 */
-		hdl->vaddr = dma_alloc_coherent(amdxdna_fw_dma_dev(xdna), hdl->size,
-						&hdl->dma_addr, GFP_KERNEL);
+		hdl->vaddr = dma_alloc_noncoherent(amdxdna_fw_dma_dev(xdna), hdl->size,
+						   &hdl->dma_addr,
+						   DMA_BIDIRECTIONAL, GFP_KERNEL);
 		if (!hdl->vaddr)
 			goto free_hdl;
 	}
@@ -477,8 +472,9 @@ void amdxdna_free_msg_buff(struct amdxdna_msg_buf_hdl *hdl)
 		amdxdna_iommu_free(hdl->xdna, hdl->size, hdl->vaddr,
 				   hdl->dma_addr);
 	} else {
-		dma_free_coherent(amdxdna_fw_dma_dev(hdl->xdna), hdl->size,
-				  hdl->vaddr, hdl->dma_addr);
+		dma_free_noncoherent(amdxdna_fw_dma_dev(hdl->xdna), hdl->size,
+				     hdl->vaddr, hdl->dma_addr,
+				     DMA_BIDIRECTIONAL);
 	}
 
 	kfree(hdl);
@@ -513,11 +509,11 @@ static void amdxdna_msg_buff_sync(struct amdxdna_msg_buf_hdl *hdl, u64 offset,
 	if (IS_ENABLED(CONFIG_X86))
 		drm_clflush_virt_range(to_cpu_addr(hdl, offset), size);
 	else if (dir == DMA_FROM_DEVICE)
-		dma_sync_single_for_cpu(hdl->xdna->ddev.dev, to_dma_addr(hdl, offset),
-					size, dir);
+		dma_sync_single_for_cpu(amdxdna_fw_dma_dev(hdl->xdna),
+					to_dma_addr(hdl, offset), size, dir);
 	else
-		dma_sync_single_for_device(hdl->xdna->ddev.dev, to_dma_addr(hdl, offset),
-					   size, dir);
+		dma_sync_single_for_device(amdxdna_fw_dma_dev(hdl->xdna),
+					   to_dma_addr(hdl, offset), size, dir);
 }
 
 void amdxdna_msg_buff_sync_for_device(struct amdxdna_msg_buf_hdl *hdl)
