@@ -25,6 +25,4 @@ static inline bool amdxdna_use_cma(struct amdxdna_dev *xdna)
 struct amdxdna_gem_obj *
 amdxdna_get_cma_buf(struct drm_device *dev, struct amdxdna_drm_create_bo *args);
 
-bool amdxdna_is_cma_bo(struct amdxdna_gem_obj *abo);
-
 #endif /* _AMDXDNA_CMA_BUF_H_ */
