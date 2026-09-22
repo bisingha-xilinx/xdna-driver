@@ -570,6 +570,17 @@ int aie4_hwctx_init(struct amdxdna_hwctx *hwctx)
 	if (!AIE_FEATURE_ON(&ndev->aie, AIE4_HSA_COMMAND))
 		return -EOPNOTSUPP;
 
+	/*
+	 * User-mode submission leaves host-queue cache maintenance to user space,
+	 * which is unsupported on the non-coherent platform transport: the driver
+	 * never sets up umq_sgt for a UMS context, so the host-queue syncs in
+	 * get_read_index() would dereference NULL.  The kernel_mode_submission
+	 * debugfs knob can clear ndev->kernel_submit, so refuse the UMS context
+	 * here instead of crashing later.
+	 */
+	if (!ndev->kernel_submit && !aie4_dev_coherent(xdna))
+		return -EOPNOTSUPP;
+
 	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
