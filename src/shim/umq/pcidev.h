@@ -48,20 +48,16 @@ private:
 };
 
 // Non-coherent UMQ part (the aarch64 platform): the CPU and device caches are
-// not kept in sync by hardware. Driver-allocated BOs are backed by coherent
-// (non-cacheable) DMA memory, so xrt::bo::sync() is a no-op (inherited from
-// pdev_umq). An imported cacheable dmabuf cannot be cache-maintained by the
-// kernel either, so importing one is warned about rather than synced.
+// not kept in sync by hardware, so BOs need explicit cache maintenance. On
+// aarch64 EL0 cache ops may be disabled, so route it through the driver.
 class pdev_umq_nc : public pdev_umq
 {
 public:
   using pdev_umq::pdev_umq;
 
-  // Non-coherent: the kernel cannot maintain caches for an imported cacheable
-  // dmabuf, so xrt::bo::sync() on an imported BO is a no-op. Warn once per
-  // imported BO unless XRT_NO_WARN_IMPORT_BO_CREATION is set.
   void
-  warn_imported_bo() const override;
+  sync_bo(buffer& bo, xrt_core::buffer_handle::direction dir,
+          size_t size, size_t offset) const override;
 };
 
 class pdev_pf : public pdev_umq

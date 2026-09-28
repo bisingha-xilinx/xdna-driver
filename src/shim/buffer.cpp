@@ -794,8 +794,7 @@ dbg_buffer::
 sync(direction dir, size_t sz, size_t offset)
 {
   // A debug BO's device2host reads always go through the driver, regardless of
-  // the device's coherency policy; host2device follows the normal path. Both
-  // paths validate the range (buffer::sync() / pdev::driver_sync_bo()).
+  // the device's coherency policy; host2device follows the normal path.
   if (dir == xrt_core::buffer_handle::direction::host2device)
     buffer::sync(dir, sz, offset);
   else
