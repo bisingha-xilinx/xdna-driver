@@ -170,13 +170,9 @@ static void amdxdna_gem_cbuf_obj_free(struct drm_gem_object *gobj)
 	struct amdxdna_gem_obj *abo = to_xdna_obj(gobj);
 	struct amdxdna_carveout *carveout = xdna->carveout;
 
+	/* Drop the device mapping (dma_addr) taken while in use. */
+	amdxdna_dma_unmap_bo(xdna, abo);
 	/*
-	 * No amdxdna_dma_unmap_bo() here: carveout never holds a private IOVA
-	 * mapping (amdxdna_dma_map_bo() only records sg_dma_address on IOVA-off and
-	 * is rejected on IOVA-on as the resource sgt is not page-backed). The
-	 * dma_map_resource() mapping is torn down by amdxdna_cbuf_unmap_resource()
-	 * below.
-	 *
 	 * Release the cached CPU mapping; unlike CMA's page_address(), the
 	 * carveout vmap ioremap_cache()s and must be iounmap()ed.
 	 */
