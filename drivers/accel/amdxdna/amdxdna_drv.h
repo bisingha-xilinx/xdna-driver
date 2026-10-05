@@ -141,6 +141,11 @@ struct amdxdna_dev_info {
 	const struct amdxdna_fw_feature_tbl *fw_feature_tbl;
 	const struct amdxdna_fw_feature_tbl *cert_feature_tbl;
 	const struct amdxdna_dev_ops	*ops;
+	/*
+	 * Firmware gives each hardware context its own partition, sized to that
+	 * context, instead of one device-wide partition created at probe.
+	 */
+	bool				partition_per_hwctx;
 
 	/*
 	 * Create the AIE partition per hwctx (aie4_hwctx_create) rather than
